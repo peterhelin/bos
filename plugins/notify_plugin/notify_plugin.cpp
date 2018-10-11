@@ -96,7 +96,6 @@ class notify_plugin_impl {
       }
 
       fc::variant deserialize_action_data(action act) {
-        // ilog("deserialize_action_data - action:", ("u",act));  //~ happens on every block
         auto& chain = chain_plug->chain();
         auto serializer = chain.get_abi_serializer(act.account, max_deserialization_time);
         FC_ASSERT(serializer.valid() && serializer->get_action_type(act.name) != action_name(),
@@ -106,12 +105,8 @@ class notify_plugin_impl {
       }
 
       void build_message(message& msg, const block_state_ptr& block, const transaction_id_type& tx_id) {
-        // ilog("inside build_message - transaction id: ${u}", ("u",tx_id));
         auto range = action_queue.equal_range(tx_id);
         for (auto& it = range.first; it != range.second; it++) {
-          // ilog("inside build_message for loop on iterator for action_queue range");
-          // ilog("iterator it->first: ${u}", ("u",it->first));
-          // ilog("iterator it->second: ${u}", ("u",it->second));
           auto act_data = deserialize_action_data(it->second);
           action_notify notify(it->second, tx_id, std::forward<fc::variant>(act_data),
                               block->block->timestamp, block->block->block_num());
@@ -129,25 +124,19 @@ class notify_plugin_impl {
 
       action_seq_type on_action_trace(const action_trace& act, const transaction_id_type& tx_id,
                                      action_seq_type act_s) {
-        // ilog("on_action_trace - tx id: ${u}", ("u",tx_id));
-        // ilog("on_action_trace - act: ${act}", ("act", act));
         if (filter(act)) {
           action_queue.insert(std::make_pair(tx_id, sequenced_action(act.act, act_s, act.receipt.receiver)));
-          // ilog("Added to action_queue: ${u}", ("u",act.act));
         }
         act_s++;
 
         for (const auto& iline: act.inline_traces) {
-          // ilog("Processing inline_trace: ${u}", ("u",iline));
           act_s = on_action_trace(iline, tx_id, act_s);
         }
         return act_s;
       }
 
       void on_applied_tx(const transaction_trace_ptr& trace) {
-        // ilog("on_applied_tx - trace object: ${u}", ("u",trace));
         auto id = trace->id;
-        // ilog("action_queue.count(id): ${u}",("u",action_queue.count(id)));
         if (! action_queue.count(id)) {
           action_seq_type seq = 0;
           for( auto& at : trace->action_traces ) {
@@ -157,35 +146,26 @@ class notify_plugin_impl {
       }
 
       void on_accepted_block(const block_state_ptr& block_state) {
-        // ilog("on_accepted_block | block_state->block: ${u}", ("u",block_state->block));
         fc::time_point block_time = block_state->block->timestamp;
         if( age_limit == -1 || (fc::time_point::now() - block_time < fc::seconds(age_limit))) {
           message msg;
           transaction_id_type tx_id;
-
-          // ilog("Looping over all transaction objects in block_state->block->transactions");
           for (const auto& trx: block_state->block->transactions) {
             if (trx.trx.contains<transaction_id_type>()) {
-              // ilog("===> block_state->block->transactions->trx ID: ${u}", ("u",trx.trx.get<transaction_id_type>()));
               tx_id = trx.trx.get<transaction_id_type>();
             } else {
-              // ilog("===> block_state->block->transactions->trx ID: ${u}", ("u",trx.trx.get<packed_transaction>().id()));
               tx_id = trx.trx.get<packed_transaction>().id();
             }
 
-            // ilog("action_queue.size: ${u}", ("u",action_queue.size()));
             if (action_queue.count(tx_id)) {
               build_message(msg, block_state, tx_id);
             }
           }
-          // ilog("Done processing block_state->block->transactions");
 
           if (msg.actions.size() > 0) {
-            // ilog("Sending message - msg.actions.size(): ${u}",("u",msg.actions.size()));
             send_message(msg);
           }
         }
-        // TODO: Leave unsent actions until they are expired or are included in future blocks?
         action_queue.clear();
       }
 };
