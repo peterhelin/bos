@@ -1360,6 +1360,10 @@ class context_free_transaction_api : public context_aware_api {
          return context.get_packed_transaction().size();
       }
 
+       void get_transaction_id( fc::sha256& id ) {
+          id = context.trx_context.id;
+       }
+
       int expiration() {
         return context.trx_context.trx.expiration.sec_since_epoch();
       }
@@ -1642,6 +1646,75 @@ class call_depth_api : public context_aware_api {
       }
 };
 
+
+class producer_random_seed_api : public context_aware_api {
+public:
+   producer_random_seed_api(apply_context& ctx)
+           : context_aware_api(ctx) {}
+   int producer_random_seed(array_ptr<char> sig, size_t siglen) {
+      auto data = timestamp_txid();
+      fc::sha256::encoder encoder;
+      encoder.write(reinterpret_cast<const char*>(data.data()), data.size());
+      auto digest = encoder.result();
+      optional<fc::crypto::signature> signature;
+      auto block_state = context.control.pending_block_state();
+      for (auto& extension: block_state->block->block_extensions) {
+         if (extension.first != static_cast<uint16_t>(block_extension_type::producer_random_seed)) continue;
+         EOS_ASSERT(extension.second.size() > 32, transaction_exception, "invalid producer signature in block extensions");
+         transaction_id_type tx_id(extension.second.data(), 32);
+         if (tx_id != context.trx_context.id) continue;
+         // Have found produced random seed for this transaction in block extensions
+         auto sig_data = extension.second.data() + 32;
+         auto sig_size = extension.second.size() - 32;
+         signature.emplace();
+         datastream<const char*> ds(sig_data, sig_size);
+         fc::raw::unpack(ds, *signature);
+         auto check = fc::crypto::public_key(*signature, digest, false);
+         EOS_ASSERT( check == block_state->block_signing_key, transaction_exception, "wrong expected key different than recovered key" );
+         break;
+      }
+      bool sign = false;
+      if (context.control.is_producing_block()) {
+         // Producer is producing this block
+         auto signer = context.control.pending_producer_signer();
+         if (signer) {
+            signature = signer(digest);
+            sign = true;
+         }
+      }
+      EOS_ASSERT(!!signature, transaction_exception, "empty producer random seed");
+      auto& s = *signature;
+      auto sig_size = fc::raw::pack_size(s);
+      if (siglen == 0) return sig_size;
+      if (sig_size <= siglen) {
+         datastream<char*> ds(sig, sig_size);
+         fc::raw::pack(ds, s);
+         if (sign) {
+            block_state->block->block_extensions.emplace_back();
+            auto &extension = block_state->block->block_extensions.back();
+            extension.first = static_cast<uint16_t>(block_extension_type::producer_random_seed);
+            extension.second.resize(32 + sig_size);
+            std::copy(context.trx_context.id.data(), context.trx_context.id.data() + 32, extension.second.data());
+            std::copy((char*)sig, (char*)sig + sig_size, extension.second.data() + 32);
+         }
+         return sig_size;
+      }
+      return 0;
+   }
+private:
+   vector<uint32_t> timestamp_txid() {
+      auto current = static_cast<uint64_t>( context.control.pending_block_time().time_since_epoch().count() );
+      uint32_t* current_halves = reinterpret_cast<uint32_t*>(&current);
+      uint32_t* tx_id_parts = reinterpret_cast<uint32_t*>(context.trx_context.id.data());
+      return vector<uint32_t>{current_halves[0], current_halves[1],
+                              tx_id_parts[0], tx_id_parts[1], tx_id_parts[2], tx_id_parts[3],
+                              tx_id_parts[4], tx_id_parts[5], tx_id_parts[6], tx_id_parts[7]};
+   }
+};
+REGISTER_INTRINSICS(producer_random_seed_api,
+(producer_random_seed,  int(int, int)               )
+);
+
 REGISTER_INJECTED_INTRINSICS(call_depth_api,
    (call_depth_assert,  void()               )
 );
@@ -1821,6 +1894,7 @@ REGISTER_INTRINSICS(console_api,
 REGISTER_INTRINSICS(context_free_transaction_api,
    (read_transaction,       int(int, int)            )
    (transaction_size,       int()                    )
+   (get_transaction_id,     void(int)                )
    (expiration,             int()                    )
    (tapos_block_prefix,     int()                    )
    (tapos_block_num,        int()                    )
